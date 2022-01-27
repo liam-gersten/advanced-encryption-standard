@@ -1,3 +1,5 @@
 .idea
+.vscode
+a.out.dSYM
 .DS_Store
 dist
