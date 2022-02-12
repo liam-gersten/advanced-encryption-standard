@@ -10,9 +10,11 @@ struct matrix_info {
 typedef struct state_info state;
 struct state_info {
     matrix **chunks;
+    matrix *permutation;
     int count;
 };
 
+typedef matrix *make_permutation_fn();
 typedef void rotate_word_fn(char *w);
 typedef void free_matrix_fn(matrix *m);
 
@@ -24,11 +26,11 @@ void free_matrix(matrix *m) {
 void free_state(state *s, free_matrix_fn *F) {
     printf("freeing state\n");
     if (F != NULL) {
-        for (int i = 0; i < s->count; i++) {
-            (*F)((s->chunks)[i]);
-        }
+        for (int i = 0; i < s->count; i++) (*F)((s->chunks)[i]);
     }
     free(s->chunks);
+    free(s->permutation->vals);
+    free(s->permutation);
     free(s);
 }
 
@@ -57,6 +59,14 @@ int hex_to_row(char h) {
 
 int hex_to_col(char h) {
     return (int)(h & 0x0F);
+}
+
+void print_text(char *text, size_t text_length) {
+    for (size_t i = 0; i < text_length; i++) {
+        char c = text[i];
+        if (c == '\0' || c == '\n' || c == '\t') printf("@");
+        else printf("%c", c);
+    }
 }
 
 void print_matrix(matrix *A) {
@@ -93,28 +103,56 @@ void add_scalar(matrix *A, int scalar) {
     }
 }
 
+char gf_mult_recursive(char a, char b) {  // REQUIRES a >= 0 //
+    if (a == 0x02) return b << 1;
+    return b ^ gf_mult_recursive((char)(((int)a) - 1), b);
+}
+
+char gf_mult(char a, char b) {
+    if ((int)a == 1) return b;
+    if ((int)a == 0) return a;
+    if ((int)b < 0) return gf_mult_recursive(a, b) ^ 0x1B;
+    return gf_mult_recursive(a, b);
+}
+
 void multiply_matrices(matrix *A, matrix *B, free_matrix_fn *F) {
     printf("\t\tmultiplying matrices\n");
     char *tmp = calloc(sizeof(char), 16);
-    for (size_t row = 0; row < 4; row++) {
-        for (size_t col = 0; col < 4; col++) {
-            int tmp_char = 0;
-            for (size_t other = 0; other < 4; other++) {
-                int index1 = coords_to_index(row, (int)other, 4);
-                int index2 = coords_to_index((int)other, col, 4);
-                int prod1 = (int)((A->vals)[index1]);
-                int prod2 = (int)((B->vals)[index2]);
-                tmp_char = tmp_char + (prod1 * prod2);
+    for (int row = 0; row < 4; row++) {
+        for (int col = 0; col < 4; col++) {
+            char tmp_char = 0;
+            for (int other = 0; other < 4; other++) {
+                int index1 = coords_to_index(row, other, 4);
+                int index2 = coords_to_index(other, col, 4);
+                char prod1 = (A->vals)[index1];
+                char prod2 = (B->vals)[index2];
+                tmp_char = tmp_char ^ gf_mult(prod1, prod2);
             }
-            int tmp_index = coords_to_index(row, col, 4);
-            tmp[tmp_index] = (char)tmp_char;
+            tmp[coords_to_index(row, col, 4)] = tmp_char;
         }
     }
-    free(A->vals);
-    A->vals = tmp;
-    if (F != NULL) {
-        (*F)(B);
-    }
+    free(B->vals);
+    B->vals = tmp;
+    if (F != NULL) (*F)(A);
+}
+
+matrix *comprise_matrix(char *key) {
+    matrix *m = malloc(sizeof(matrix));
+    char *values = calloc(sizeof(char), 16);
+    for (size_t i = 0; i < 16; i++) values[i] = key[i];
+    m->vals = values;
+    return m;
+}
+
+matrix *mix_cols_matrix() {
+    char key[] = {2, 3, 1, 1, 1, 2, 3, 1, 1, 1, 2, 3, 3, 1, 1, 2};
+    return comprise_matrix(key);
+}
+
+matrix *inv_mix_cols_matrix() {
+    char key[] = {0x0E, 0x0B, 0x0D, 0x09, 0x09, 0x0E, 0x0B, 0x0D, 0x0D, 0x09, 
+                0x0E, 0x0B, 0x0B, 0x0D, 0x09, 0x0E};
+    return comprise_matrix(key);
 }
 
 char *comprise_text(state *current_state) {
@@ -126,19 +164,15 @@ char *comprise_text(state *current_state) {
             for (int row = 0; row < 4; row++) {
                 int index = coords_to_index(row, col, 4);
                 char tmp = (((current_state->chunks)[i])->vals)[index];
-                if (tmp == '\0') {
-                    return text;
-                } else {
-                    text[char_count] = tmp;
-                    char_count++;
-                }
+                text[char_count] = tmp;
+                char_count++;
             }
         }
     }
     return text;
 }
 
-state *comprise_state(char *text, int text_length) {
+state *comprise_state(char *text, int text_length, make_permutation_fn *F) {
     printf("\ncomprising state from text\n\n");
     int char_count = 0;
     int chunk_count = text_length/16;
@@ -146,6 +180,7 @@ state *comprise_state(char *text, int text_length) {
         chunk_count++;
     }
     state *current_state = malloc(sizeof(state));
+    current_state->permutation = (*F)();
     current_state->chunks = calloc(sizeof(matrix*), (size_t)chunk_count);
     for (int i = 0; i < chunk_count; i++) {
         matrix *current_chunk = malloc(sizeof(matrix));
@@ -185,9 +220,9 @@ char *generate_key(size_t key_size) {
     return key;
 }
 
-int get_round_constant(int round) {
+char get_round_constant(int round) {
     if (round == 1) return 1;
-    return 2 * get_round_constant(round - 1);
+    return gf_mult(2, get_round_constant(round - 1));
 }
 
 void word_substitute(char *word, char *sbox) {
@@ -202,14 +237,12 @@ void word_substitute(char *word, char *sbox) {
 }
 
 void left_rotate_word(char *word) {
-    printf("\t\tleft rotating word\n");
     char byte_1 = word[0];
     for (size_t i = 1; i < 4; i++) word[i - 1] = word[i];
     word[3] = byte_1;
 }
 
 void right_rotate_word(char *word) {
-    printf("\t\tright rotating word\n");
     char byte_4 = word[3];
     for (int i = 2; i >= 0; i--) word[i + 1] = word[i];
     word[0] = byte_4;
@@ -217,11 +250,15 @@ void right_rotate_word(char *word) {
 
 int subexpansion(int word, int round, char *sbox) {
     printf("\tsubexpansion\n");
-    char new_word = (char)word;
-    left_rotate_word(&new_word);
-    word_substitute(&new_word, sbox);
-    int round_constant = get_round_constant(round) << 24;
-    return new_word ^ round_constant;
+    int *tmp_word = malloc(sizeof(int));
+    *tmp_word = word;
+    char *new_word = (char*)tmp_word;
+    left_rotate_word(new_word);
+    word_substitute(new_word, sbox);
+    int round_constant = ((int)get_round_constant(round)) << 24;
+    int result = (*((int*)new_word)) ^ round_constant;
+    free(new_word);
+    return result;
 }
 
 char *construct_sbox() {
@@ -288,17 +325,28 @@ char *construct_inverse_sbox() {
 
 int *expand_key(char *key, size_t key_size, char *sbox) {
     printf("expanding key\n");
-    int rounds = size_to_rounds(key_size);
-    int *keys = calloc(4 + (size_t)rounds, sizeof(int));
+    size_t rounds = (size_t)size_to_rounds(key_size);
+    int *keys = calloc(4 + rounds, sizeof(int));
     for (size_t i = 0; i < 4; i++) keys[i] = ((int*)key)[i];
     int tmp;
-    for (size_t i = 4; i < 44; i++) {
+    for (size_t i = 4; i < 4 * (rounds + 1); i++) {
         tmp = keys[i - 1];
         if (i % 4 == 0) {  // i divisible by 4 special case
             tmp = subexpansion(tmp, i / 4, sbox);
         }
         keys[i] = tmp ^ keys[i - 4];
     }
+    printf("\ncipher keys = ");
+    char *c_k = (char*)keys;
+    for (size_t i = 0; i < 16 * (1 + rounds); i++) {
+        if (i % 16 == 0) printf("\n0x ");
+        if (c_k[i] == ' ' || c_k[i] == '\n' || c_k[i] == '\t') {
+            printf("@");
+        } else {
+            printf("%c", c_k[i]);
+        }
+    }
+    printf("\n\n");
     return keys;
 }
 
@@ -307,7 +355,7 @@ void copy_words(int *src, int *dest, size_t start) {
 }
 
 void substitute_bytes(matrix *text, char *sbox) {  // pass rotate function
-    printf("\tbyte substitution\n");
+    printf("\tbyte substitution");
     for (size_t i = 0; i < 16; i++) {
         int row = hex_to_row((text->vals)[i]);
         int col = hex_to_col((text->vals)[i]);
@@ -317,104 +365,128 @@ void substitute_bytes(matrix *text, char *sbox) {  // pass rotate function
 }
 
 void shift_rows(matrix *text, rotate_word_fn *F) {
-    printf("\tshifting rows\n");
+    printf("\tshifting rows");
     for (size_t row_num = 1; row_num < 4; row_num++) {
         char *row = (text->vals)+(row_num * 4);
         for (size_t i = 0; i < row_num; i++) (*F)(row);
     }
 }
 
-void mix_columns(matrix *text) {
-    printf("\tmixing columns\n");
-    return;
-}
-
-void inv_mix_columns(matrix *text) {
-    printf("\tinverse mixing columns\n");
-    return;
+void mix_columns(matrix *A, matrix *B) {
+    printf("\tmixing columns");
+    multiply_matrices(A, B, NULL);
 }
 
 void add_round_key(matrix *text, int *words) {
-    printf("\tadding round key\n");
+    printf("\tadding round key");
     return;
 }
 
-void cipher_round(matrix *text, char *sbox, int *words) {
+void cipher_round(matrix *text, char *sbox, int *words, matrix *perm) {
     substitute_bytes(text, sbox);
     shift_rows(text, &left_rotate_word);
-    mix_columns(text);
+    mix_columns(perm, text);
     add_round_key(text, words);
+    printf("\n");
 }
 
-void inverse_cipher_round(matrix *text, char *sbox, int *words) {
+void inverse_cipher_round(matrix *text, char *sbox, int *words, matrix *perm) {
     shift_rows(text, &right_rotate_word);
     substitute_bytes(text, sbox);
     add_round_key(text, words);
-    inv_mix_columns(text);
+    mix_columns(perm, text);
+    printf("\n");
 }
 
-void replace_text(char *old_text, state *current_state, char *key) {
+char *remove_padding(char *old_text, size_t *text_length) {
+    size_t new_length = 0;
+    for (size_t i = 0; i < *text_length; i++) {
+        if (old_text[i] == '\0') break;
+        new_length++;
+    }
+    char *new_text = calloc(sizeof(char), new_length);
+    for (size_t i = 0; i < new_length; i++) new_text[i] = old_text[i];
+    free(old_text);
+    *text_length = new_length;
+    return new_text;
+}
+
+void replace_text(char *old_text, state *current_state) {
     printf("replacing text\n");
     char *new_text = comprise_text(current_state);
     for (size_t i = 0; i < (current_state->count)*16; i++) {
         old_text[i] = new_text[i];
     }
     free(new_text);
-    free(key);
     free_state(current_state, &free_matrix);
 }
 
-void encrypt(char *old_text, size_t text_length, size_t key_size) {
+char *encrypt(char *old_text, size_t *text_length, size_t key_size) {
     printf("encrypting\n");
     char *key = generate_key(key_size);
-    state *current_state = comprise_state(old_text, text_length);
+    state *current_state = comprise_state(old_text, *text_length, 
+                                          &mix_cols_matrix);
+    *text_length = 16 * (size_t)(current_state->count);
     char *sbox = construct_sbox();
     int *cipher_keys = expand_key(key, key_size, sbox);
     size_t round_number = size_to_rounds(key_size);
     int *words = calloc(sizeof(int), 4);
     for (size_t i = 0; i < current_state->count; i++) {
         matrix *text = (current_state->chunks)[i]; 
+        printf("\ncipher round number 0");
         copy_words(cipher_keys, words, 0);
         add_round_key(text, words);
+        printf("\n");
         for (size_t c_round = 1; c_round < round_number; c_round++) {
-            printf("\ncipher round number %d\n", (int)c_round);
+            printf("cipher round number %d", (int)c_round);
             copy_words(cipher_keys, words, (c_round * 4));
-            cipher_round(text, sbox, words);
+            cipher_round(text, sbox, words, current_state->permutation);
         }
+        printf("cipher round number %d", (int)round_number);
         copy_words(cipher_keys, words, (round_number * 4));
         substitute_bytes(text, sbox);
         shift_rows(text, &left_rotate_word);
         add_round_key(text, words);
+        printf("\n\n");
     }
-    replace_text(old_text, current_state, key);
+    replace_text(old_text, current_state);
     free(words);
     free(sbox);
     free(cipher_keys);
+    return key;
 }
 
 void decrypt(char *old_text, char *key, size_t text_length, size_t key_size) {
     printf("decrypting\n");
-    state *current_state = comprise_state(old_text, text_length);
+    state *current_state = comprise_state(old_text, text_length, 
+                                          &inv_mix_cols_matrix);
     char *sbox = construct_inverse_sbox();
     int *cipher_keys = expand_key(key, key_size, sbox);
     size_t round_number = size_to_rounds(key_size);
     int *words = calloc(sizeof(int), 4);
     for (size_t i = 0; i < current_state->count; i++) {
         matrix *text = (current_state->chunks)[i];
+        printf("\ncipher round number 0");
+        print_matrix(text);
         copy_words(cipher_keys, words, (round_number * 4));
         add_round_key(text, words);
+        printf("\n");
         for (size_t c_round = 1; c_round < round_number; c_round++) {
-            printf("\ncipher round number %d\n", (int)c_round);
+            printf("cipher round number %d", (int)c_round);
+            print_matrix(text);
             copy_words(cipher_keys, words, ((round_number - c_round) * 4));
-            inverse_cipher_round(text, sbox, words);
+            inverse_cipher_round(text, sbox, words, current_state->permutation);
         }
+        printf("cipher round number %d", (int)round_number);
+        print_matrix(text);
         copy_words(cipher_keys, words, 0);
         shift_rows(text, &right_rotate_word);
-        inv_substitute_bytes(text, sbox);
+        substitute_bytes(text, sbox);
         add_round_key(text, words);
-        
+        print_matrix(text);
+        printf("\n\n");
     }
-    replace_text(old_text, current_state, key);
+    replace_text(old_text, current_state);
     free(words);
     free(sbox);
     free(cipher_keys);
@@ -422,17 +494,36 @@ void decrypt(char *old_text, char *key, size_t text_length, size_t key_size) {
 
 int main(int argc, char *argv[]) {
     char *h = "This is a string of text to be used as input";
-
+    // char *h = "abcdefghijklmnopabcdefghijklmnop";
     char *old_text = calloc(sizeof(char), strlen(h));
     char *text = strcpy(old_text, h);
-    encrypt(text, strlen(h), 256);
-    printf("\ntext = %s\n\n", text);
+    size_t key_size = 256;
+    size_t *text_length = malloc(sizeof(size_t));
+    *text_length = strlen(h);
+    printf("\n\ntext length = %d\n\n\n", (int)(*text_length));
+    printf("\noriginal text = ");
+    print_text(text, *text_length);
+    char *key = encrypt(text, text_length, key_size);
+    printf("\n\ntext length = %d\n\n\n", (int)(*text_length));
+    printf("\nencrypted text = ");
+    print_text(text, *text_length);
+    for (size_t i = 0; i < *text_length; i++) printf("0x%d ", (int)(text[i]));
+    printf("\n\n");
+    printf("\nencryption key = ");
+    print_text(key, key_size/8);
+    decrypt(text, key, *text_length, key_size);
+    text = remove_padding(text, text_length);
+    printf("\n\ntext length = %d\n\n\n", (int)(*text_length));
+    // printf("\ndecrypted text = ");
+    // print_text(text, *text_length);
 
     // char *old_text = calloc(sizeof(char), strlen(argv[1]));
     // char *text = strcpy(old_text, argv[1]);
     // encrypt(text, NULL, strlen(argv[1]), 256);
 
     free(text);
+    free(key);
+    free(text_length);
     system("leaks executablename");
     return 0;
 }
